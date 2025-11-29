@@ -223,4 +223,4 @@ The implementation uses `WorkflowAPIError` from `@workflow/errors` for consisten
 
 ## License
 
-Apache-2.0
+MIT

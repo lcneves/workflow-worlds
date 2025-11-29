@@ -16,9 +16,9 @@
     "durable-functions",
     "devkit"
   ],
-  "author": "",
+  "author": "Dustin Townsend",
   "license": "MIT",
-  "packageManager": "pnpm@9.15.0",
+  "packageManager": "pnpm@10.11.0",
   "engines": {
     "node": ">=20"
   }
