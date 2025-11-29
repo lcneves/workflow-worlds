@@ -1,68 +1,84 @@
-# World Starter
+# MongoDB World
 
-This is a working in-memory World implementation that passes all tests.
+MongoDB-backed World implementation for the Workflow DevKit.
 
-## Development Workflow
-1. `pnpm install` - Install dependencies
-2. `pnpm build` - Compile TypeScript
-3. `pnpm test` - Run test suite (must pass before any changes)
+## Commands
 
-## Implementing Your Backend
+```bash
+pnpm build          # Build TypeScript
+pnpm test           # Run tests (requires Docker)
+pnpm test:only      # Run tests without rebuilding
+pnpm typecheck      # Type check only
+```
 
-Replace each file incrementally, testing after each:
+## Environment Variables
 
-### 1. storage.ts (largest)
-- Replace Maps with your database (MongoDB, PostgreSQL, etc.)
-- Keep deep cloning pattern for in-memory caches
-- Maintain ULID prefixes (wrun_, wstep_, wevt_, whook_)
+All options are configurable via `WORKFLOW_` prefixed environment variables:
 
-### 2. queue.ts
-- Replace setTimeout with your queue (BullMQ, Agenda, SQS)
-- Use your queue's native idempotency features
-- Keep the HTTP handler pattern
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `WORKFLOW_MONGODB_URI` | MongoDB connection string | `mongodb://localhost:27017` |
+| `WORKFLOW_MONGODB_DATABASE_NAME` | Database name | `workflow` |
+| `WORKFLOW_MONGODB_CHANGE_STREAMS` | Enable change streams | `true` |
+| `WORKFLOW_SERVICE_URL` | Base URL for HTTP callbacks | `http://localhost:{PORT}` |
+| `WORKFLOW_CONCURRENCY` | Max concurrent message processing | `20` |
 
-### 3. streamer.ts
-- Replace EventEmitter with pub/sub (Redis, Kafka, etc.)
-- Maintain chunk ordering with ULIDs
+## Architecture
 
-## Test Suite
-All 5 tests must pass:
-- addition: Basic workflow execution
-- idempotency: 110 steps, state reconstruction
-- hooks: Hook/resume mechanism
-- errors: RetryableError, FatalError
-- nullByte: Binary data handling
+```
+src/
+├── index.ts      # Main entry, createWorld factory
+├── storage.ts    # Runs, steps, events, hooks collections
+├── queue.ts      # TTL-based idempotency queue
+└── streamer.ts   # Change streams for real-time output
+```
 
-## Key Files
+## Key Implementation Details
 
-| File | Purpose |
-|------|---------|
-| `src/index.ts` | Entry point, exports `createWorld` |
-| `src/storage.ts` | Runs, steps, events, hooks storage |
-| `src/queue.ts` | Message queue with idempotency |
-| `src/streamer.ts` | Real-time output streaming |
-| `test/spec.test.ts` | Test suite configuration |
+### MongoDB-Specific Patterns
 
-## Error Handling
+1. **Null to Undefined Conversion**: MongoDB stores `undefined` as `null`. Use `cleanMongoDoc()` to convert back.
 
-Use `WorkflowAPIError` from `@workflow/errors` for storage errors:
+2. **Upsert for Idempotent Steps**: Steps use `findOneAndUpdate` with `$setOnInsert` to handle duplicate step creation.
+
+3. **Change Streams**: Requires MongoDB replica set. Falls back gracefully to in-process events.
+
+4. **TTL Indexes**: Idempotency keys auto-expire after 60 seconds via MongoDB TTL index.
+
+### Collections
+
+- `runs` - Workflow run records
+- `steps` - Step execution records
+- `events` - Event log for replay
+- `hooks` - Hook registrations
+- `stream_chunks` - Stream output
+- `idempotency_keys` - TTL-based dedup (auto-expires)
+
+### Testing
+
+Tests use `@testcontainers/mongodb` to spin up MongoDB 7:
 
 ```typescript
-import { WorkflowAPIError } from '@workflow/errors';
-
-// 404 for not found
-throw new WorkflowAPIError(`Run not found: ${id}`, { status: 404 });
-
-// 409 for conflicts/duplicates
-throw new WorkflowAPIError(`Hook with token ${token} already exists`, { status: 409 });
+const container = await new MongoDBContainer('mongo:7').start();
+process.env.WORKFLOW_MONGODB_URI = container.getConnectionString() + '?directConnection=true';
 ```
 
 ## Common Issues
 
 | Issue | Solution |
 |-------|----------|
-| `step.retryAfter.getTime is not a function` | Use `structuredClone()` instead of JSON.parse/stringify |
-| Idempotency deadlock | Use TTL-based deduplication, not inflight tracking |
-| Events out of order | Ensure events.list returns ascending sort (oldest first) |
-| Hooks test hanging | Check events.create handles `hook_received` type |
-| Generic 500 errors | Use `WorkflowAPIError` with proper status codes |
+| `expected undefined, received null` | Ensure `cleanMongoDoc()` is called on all returned documents |
+| Duplicate key error on steps | Use upsert pattern with `$setOnInsert` |
+| Change stream errors | Set `WORKFLOW_MONGODB_CHANGE_STREAMS=false` or use replica set |
+| Connection issues in tests | Ensure Docker/OrbStack is running |
+
+## Error Handling
+
+Use `WorkflowAPIError` from `@workflow/errors`:
+
+```typescript
+import { WorkflowAPIError } from '@workflow/errors';
+
+throw new WorkflowAPIError(`Run not found: ${id}`, { status: 404 });
+throw new WorkflowAPIError(`Duplicate token`, { status: 409 });
+```
