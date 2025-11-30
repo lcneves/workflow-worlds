@@ -10,6 +10,18 @@ import { createQueue, type QueueConfig } from './queue.js';
 import { createStorage, type MongoStorageConfig } from './storage.js';
 import { createStreamer, type StreamerConfig } from './streamer.js';
 
+// Module-level client cache to share connections across multiple createWorld() calls
+const clientCache = new Map<string, MongoClient>();
+
+function getOrCreateClient(mongoUri: string): MongoClient {
+  let client = clientCache.get(mongoUri);
+  if (!client) {
+    client = new MongoClient(mongoUri);
+    clientCache.set(mongoUri, client);
+  }
+  return client;
+}
+
 /**
  * Configuration for the MongoDB world.
  */
@@ -52,7 +64,7 @@ export function createWorld(config: MongoDBWorldConfig = {}): World {
       ? process.env.WORKFLOW_MONGODB_CHANGE_STREAMS === 'true'
       : true);
 
-  const client = new MongoClient(mongoUri);
+  const client = getOrCreateClient(mongoUri);
 
   console.log('[mongodb-world] Creating world with:', {
     mongoUri: mongoUri.replace(/\/\/[^:]+:[^@]+@/, '//***:***@'), // Hide credentials
@@ -68,6 +80,8 @@ export function createWorld(config: MongoDBWorldConfig = {}): World {
     storage: any;
     queue: any;
     streamer: any;
+    startQueue: () => Promise<void>;
+    closeQueue: () => Promise<void>;
   }> | null = null;
 
   // Lazy initialization
@@ -90,6 +104,8 @@ export function createWorld(config: MongoDBWorldConfig = {}): World {
           storage: storageResult.storage,
           queue: queueResult.queue,
           streamer: streamerResult.streamer,
+          startQueue: queueResult.start,
+          closeQueue: queueResult.close,
         };
       })();
     }
@@ -239,11 +255,12 @@ export function createWorld(config: MongoDBWorldConfig = {}): World {
     },
 
     /**
-     * Optional: Start background tasks.
+     * Start the World as a worker that processes queue messages.
+     * Without calling start(), the World will only store data but not process anything.
      */
     async start(): Promise<void> {
-      // Ensure initialization happens
-      await ensureInitialized();
+      const { startQueue } = await ensureInitialized();
+      await startQueue();
     },
   };
 }
