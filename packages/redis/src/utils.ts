@@ -121,9 +121,10 @@ export function deserializeFromRedis<T = Record<string, unknown>>(
       continue;
     }
 
-    // Numeric values
-    if (!isNaN(Number(value)) && value !== '') {
-      result[key] = Number(value);
+    // Numeric values (only simple decimal numbers, not hex/exponential/whitespace)
+    const trimmed = value.trim();
+    if (trimmed !== '' && /^-?\d+(\.\d+)?$/.test(trimmed)) {
+      result[key] = Number(trimmed);
       continue;
     }
 

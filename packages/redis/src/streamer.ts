@@ -35,7 +35,7 @@ export interface StreamerConfig {
 export async function createStreamer(options: {
   redis: Redis;
   config?: StreamerConfig;
-}): Promise<{ streamer: Streamer }> {
+}): Promise<{ streamer: Streamer; close: () => Promise<void> }> {
   const { redis, config = {} } = options;
   const prefix = config.keyPrefix ?? 'workflow';
   const streamMaxLen = config.streamMaxLen ?? 10000;
@@ -134,6 +134,9 @@ export async function createStreamer(options: {
       name: string,
       startIndex = 0
     ): Promise<ReadableStream<Uint8Array>> {
+      // Track cleanup state for this specific stream reader
+      let streamCleanup: (() => void) | null = null;
+
       return new ReadableStream<Uint8Array>({
         async start(controller) {
           const streamKey = keys.stream(name);
@@ -368,20 +371,31 @@ export async function createStreamer(options: {
             }
           }, 100); // Poll every 100ms
 
-          // Store interval for cleanup
-          (controller as any)._pollInterval = pollInterval;
+          // Store cleanup function for cancel()
+          streamCleanup = () => {
+            clearInterval(pollInterval);
+            cleanup();
+          };
         },
 
         cancel() {
           // Clean up on cancellation
-          const pollInterval = (this as any).controller?._pollInterval;
-          if (pollInterval) {
-            clearInterval(pollInterval);
+          if (streamCleanup) {
+            streamCleanup();
+            streamCleanup = null;
           }
         },
       });
     },
   };
 
-  return { streamer };
+  /**
+   * Closes the subscriber connection.
+   * Should be called when the streamer is no longer needed.
+   */
+  async function close(): Promise<void> {
+    await subscriber.quit();
+  }
+
+  return { streamer, close };
 }

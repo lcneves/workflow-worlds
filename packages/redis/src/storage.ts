@@ -447,7 +447,7 @@ export async function createStorage(options: {
         const sortOrder = params.pagination?.sortOrder ?? 'desc';
         const limit = params.pagination?.limit ?? 100;
 
-        // Get stepIds from the run index
+        // Get stepIds from the run index (fetch limit + 1 to determine hasMore)
         let stepIds: string[];
         if (sortOrder === 'desc') {
           stepIds = await redis.zrevrange(keys.stepsIdxRun(params.runId), 0, limit);
@@ -455,12 +455,12 @@ export async function createStorage(options: {
           stepIds = await redis.zrange(keys.stepsIdxRun(params.runId), 0, limit);
         }
 
-        if (stepIds.length === 0) {
-          return { data: [], cursor: null, hasMore: false };
-        }
-
         const hasMore = stepIds.length > limit;
         const resultIds = stepIds.slice(0, limit);
+
+        if (resultIds.length === 0) {
+          return { data: [], cursor: null, hasMore: false };
+        }
 
         // Fetch full step data
         const pipeline = redis.pipeline();
@@ -724,21 +724,21 @@ export async function createStorage(options: {
           hookIds = await redis.smembers(keys.hooksIdxRun(params.runId));
         } else {
           // Scan for all hooks - this is less efficient but rarely used
-          const keys_list: string[] = [];
-          let cursor_iter = '0';
+          const keysList: string[] = [];
+          let cursorIter = '0';
           do {
             const [nextCursor, foundKeys] = await redis.scan(
-              cursor_iter,
+              cursorIter,
               'MATCH',
               `${prefix}:hooks:whook_*`,
               'COUNT',
               100
             );
-            cursor_iter = nextCursor;
-            keys_list.push(...foundKeys);
-          } while (cursor_iter !== '0');
+            cursorIter = nextCursor;
+            keysList.push(...foundKeys);
+          } while (cursorIter !== '0');
 
-          hookIds = keys_list.map((k) => k.split(':').pop()!);
+          hookIds = keysList.map((k) => k.split(':').pop()!);
         }
 
         if (hookIds.length === 0) {

@@ -9,7 +9,7 @@
  * - Graceful shutdown
  */
 
-import { Queue, Worker, Job, type ConnectionOptions, type JobsOptions, DelayedError } from 'bullmq';
+import { Queue, Worker, Job, type ConnectionOptions, type JobsOptions } from 'bullmq';
 import type {
   Queue as WorkflowQueue,
   MessageId,
@@ -137,17 +137,14 @@ export async function createQueue(options: {
         // Check for retry request (503 with timeoutSeconds)
         if (response.status === 503) {
           try {
-            const { timeoutSeconds } = JSON.parse(text);
-            if (typeof timeoutSeconds === 'number') {
-              // Use BullMQ's DelayedError to reschedule without counting as failed attempt
-              throw new DelayedError(`Retry after ${timeoutSeconds}s`);
-            }
-          } catch (e) {
-            if (e instanceof DelayedError) {
-              // Move job to delayed state
-              await job.moveToDelayed(Date.now() + (JSON.parse(text).timeoutSeconds * 1000), job.token);
+            const parsed = JSON.parse(text);
+            if (typeof parsed.timeoutSeconds === 'number') {
+              // Move job to delayed state without counting as failed attempt
+              const delayMs = parsed.timeoutSeconds * 1000;
+              await job.moveToDelayed(Date.now() + delayMs, job.token);
               return;
             }
+          } catch {
             // Not a valid retry response, fall through to error
           }
         }
@@ -155,9 +152,6 @@ export async function createQueue(options: {
         // Non-retriable error
         throw new Error(`HTTP ${response.status}: ${text}`);
       } catch (err) {
-        if (err instanceof DelayedError) {
-          throw err;
-        }
         console.error(`[redis-world] Job ${job.id} failed:`, err);
         throw err;
       }
@@ -259,7 +253,7 @@ export async function createQueue(options: {
           return Response.json({ ok: true });
         } catch (error) {
           console.error('[redis-world] Handler error:', error);
-          return Response.json(String(error), { status: 500 });
+          return Response.json({ error: String(error) }, { status: 500 });
         }
       };
     },

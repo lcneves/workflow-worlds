@@ -25,6 +25,18 @@ function getOrCreateClient(redisUrl: string): RedisClient {
     enableReadyCheck: false, // Faster connection
   });
   clientCache.set(redisUrl, client);
+
+  // Clean up cache on disconnect or error
+  const cleanup = () => {
+    if (clientCache.get(redisUrl) === client) {
+      clientCache.delete(redisUrl);
+    }
+    client.removeListener('end', cleanup);
+    client.removeListener('error', cleanup);
+  };
+  client.once('end', cleanup);
+  client.once('error', cleanup);
+
   return client;
 }
 
@@ -74,6 +86,7 @@ export function createWorld(config: RedisWorldConfig = {}): World {
     streamer: Awaited<ReturnType<typeof createStreamer>>['streamer'];
     startQueue: () => Promise<void>;
     closeQueue: () => Promise<void>;
+    closeStreamer: () => Promise<void>;
   }> | null = null;
 
   // Lazy initialization
@@ -107,6 +120,7 @@ export function createWorld(config: RedisWorldConfig = {}): World {
           streamer: streamerResult.streamer,
           startQueue: queueResult.start,
           closeQueue: queueResult.close,
+          closeStreamer: streamerResult.close,
         };
       })();
     }
