@@ -115,6 +115,61 @@ const useFeature = config.useFeature
     : true);
 ```
 
+### Debug Logging
+
+All worlds must implement configurable debug logging via `WORKFLOW_DEBUG`. Logs must be written to stderr (not stdout) to avoid interfering with CLI JSON parsing.
+
+**Usage:**
+```bash
+# Enable all debug output
+WORKFLOW_DEBUG=1 pnpm test
+
+# Enable specific worlds
+WORKFLOW_DEBUG=redis-world pnpm test
+WORKFLOW_DEBUG=mongodb-world,turso-world pnpm test
+```
+
+| Namespace | World |
+|-----------|-------|
+| `redis-world` | Redis |
+| `mongodb-world` | MongoDB |
+| `turso-world` | Turso |
+| `starter-world` | Starter |
+| `workbench` | Workbench plugin |
+
+**Implementation:** Create `src/utils.ts` with a debug logger (copy from `packages/starter/src/utils.ts`):
+
+```typescript
+function createDebugLogger(namespace: string) {
+  return (...args: unknown[]) => {
+    const debug = process.env.WORKFLOW_DEBUG;
+    if (!debug) return;
+
+    const enabled =
+      debug === '1' ||
+      debug === 'true' ||
+      debug === '*' ||
+      debug.split(',').some((ns) => ns.trim() === namespace);
+
+    if (!enabled) return;
+
+    const timestamp = new Date().toISOString();
+    const prefix = `[${timestamp}] [${namespace}]`;
+    const message = args
+      .map((arg) =>
+        typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
+      )
+      .join(' ');
+
+    process.stderr.write(`${prefix} ${message}\n`);
+  };
+}
+
+export const debug = createDebugLogger('{your-world}-world');
+```
+
+**IMPORTANT:** Never use `console.log` or `console.warn` in world implementations - they write to stdout/stderr and can corrupt CLI JSON output. Always use the debug logger instead.
+
 ## Building a New World
 
 1. Copy starter: `cp -r packages/starter packages/{backend}`

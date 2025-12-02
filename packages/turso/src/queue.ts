@@ -20,6 +20,7 @@ import type {
 } from '@workflow/world';
 import { monotonicFactory } from 'ulid';
 import { z } from 'zod';
+import { debug } from './utils.js';
 
 const generateUlid = monotonicFactory();
 
@@ -467,18 +468,17 @@ export function createQueue(config: QueueConfig): {
      */
     async start(): Promise<void> {
       if (isRunning) {
-        console.warn('[turso-world] Queue already running');
+        debug('Queue already running');
         return;
       }
 
-      console.log('[turso-world] Starting queue worker...');
+      debug('Starting queue worker...');
       isRunning = true;
       isShuttingDown = false;
 
       // Start polling
       pollAndProcess();
-
-      console.log('[turso-world] Queue worker started');
+      debug('Queue worker started');
     },
 
     /**
@@ -489,7 +489,7 @@ export function createQueue(config: QueueConfig): {
         return;
       }
 
-      console.log('[turso-world] Stopping queue worker...');
+      debug('Stopping queue worker...');
       isShuttingDown = true;
 
       // Clear poll timeout
@@ -505,7 +505,7 @@ export function createQueue(config: QueueConfig): {
       }
 
       isRunning = false;
-      console.log('[turso-world] Queue worker stopped');
+      debug('Queue worker stopped');
     },
   };
 }

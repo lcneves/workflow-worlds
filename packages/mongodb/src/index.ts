@@ -9,6 +9,7 @@ import { MongoClient } from 'mongodb';
 import { createQueue, type QueueConfig } from './queue.js';
 import { createStorage, type MongoStorageConfig } from './storage.js';
 import { createStreamer, type StreamerConfig } from './streamer.js';
+import { debug } from './utils.js';
 
 // Module-level client cache to share connections across multiple createWorld() calls
 const clientCache = new Map<string, MongoClient>();
@@ -66,7 +67,7 @@ export function createWorld(config: MongoDBWorldConfig = {}): World {
 
   const client = getOrCreateClient(mongoUri);
 
-  console.log('[mongodb-world] Creating world with:', {
+  debug('Creating world with:', {
     mongoUri: mongoUri.replace(/\/\/[^:]+:[^@]+@/, '//***:***@'), // Hide credentials
     databaseName,
     useChangeStreams,
@@ -88,9 +89,9 @@ export function createWorld(config: MongoDBWorldConfig = {}): World {
   function ensureInitialized() {
     if (!initPromise) {
       initPromise = (async () => {
-        console.log('[mongodb-world] Connecting to MongoDB...');
+        debug('Connecting to MongoDB...');
         await client.connect();
-        console.log('[mongodb-world] Connected. Initializing components...');
+        debug('Connected. Initializing components...');
 
         const [storageResult, queueResult, streamerResult] = await Promise.all([
           createStorage({ ...resolvedConfig, client, databaseName }),
@@ -98,7 +99,7 @@ export function createWorld(config: MongoDBWorldConfig = {}): World {
           createStreamer({ ...resolvedConfig, client, databaseName }),
         ]);
 
-        console.log('[mongodb-world] Initialization complete.');
+        debug('Initialization complete');
 
         return {
           storage: storageResult.storage,

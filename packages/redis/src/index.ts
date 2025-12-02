@@ -11,6 +11,7 @@ import type { Redis as RedisClient } from 'ioredis';
 import { createQueue, type QueueConfig } from './queue.js';
 import { createStorage, type RedisStorageConfig } from './storage.js';
 import { createStreamer, type StreamerConfig } from './streamer.js';
+import { debug } from './utils.js';
 
 // Module-level client cache to share connections across multiple createWorld() calls
 const clientCache = new Map<string, RedisClient>();
@@ -74,7 +75,7 @@ export function createWorld(config: RedisWorldConfig = {}): World {
   // Use provided client or create/get cached one
   const client = config.client ?? getOrCreateClient(redisUrl);
 
-  console.log('[redis-world] Creating world with:', {
+  debug('Creating world with:', {
     redisUrl: redisUrl.replace(/\/\/[^:]*:[^@]*@/, '//***:***@'), // Hide credentials
     keyPrefix: config.keyPrefix ?? 'workflow',
   });
@@ -93,7 +94,7 @@ export function createWorld(config: RedisWorldConfig = {}): World {
   function ensureInitialized() {
     if (!initPromise) {
       initPromise = (async () => {
-        console.log('[redis-world] Initializing components...');
+        debug('Initializing components...');
 
         // Wait for Redis connection
         if (client.status !== 'ready') {
@@ -112,7 +113,7 @@ export function createWorld(config: RedisWorldConfig = {}): World {
           createStreamer({ redis: client, config }),
         ]);
 
-        console.log('[redis-world] Initialization complete.');
+        debug('Initialization complete');
 
         return {
           storage: storageResult.storage,

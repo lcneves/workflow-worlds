@@ -17,6 +17,7 @@ import type {
   QueuePrefix,
 } from '@workflow/world';
 import { monotonicFactory } from 'ulid';
+import { debug } from './utils.js';
 
 const generateUlid = monotonicFactory();
 
@@ -275,7 +276,7 @@ export async function createQueue(options: {
       return;
     }
 
-    console.log('[redis-world] Starting queue workers...');
+    debug('Starting queue workers...');
 
     // Create workers for both queue types
     workflowWorker = new Worker('__wkf_workflow', createProcessor('flow'), {
@@ -304,14 +305,14 @@ export async function createQueue(options: {
     ]);
 
     isStarted = true;
-    console.log('[redis-world] Queue workers started');
+    debug('Queue workers started');
   }
 
   /**
    * Gracefully closes the queue workers and connections.
    */
   async function close(): Promise<void> {
-    console.log('[redis-world] Closing queue workers...');
+    debug('Closing queue workers...');
 
     // Close workers first (gracefully waits for in-progress jobs)
     await Promise.all([
@@ -326,7 +327,7 @@ export async function createQueue(options: {
     ]);
 
     isStarted = false;
-    console.log('[redis-world] Queue workers closed');
+    debug('Queue workers closed');
   }
 
   return { queue, start, close };
