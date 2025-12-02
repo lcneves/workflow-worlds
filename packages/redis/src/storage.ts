@@ -601,6 +601,10 @@ export async function createStorage(options: {
             if (event.createdAt) {
               event.createdAt = new Date(event.createdAt);
             }
+            // Convert eventData.resumeAt back to Date for wait_created events
+            if (event.eventData?.resumeAt) {
+              event.eventData.resumeAt = new Date(event.eventData.resumeAt);
+            }
             data.push(event);
           } catch {
             // Skip invalid JSON
@@ -638,6 +642,10 @@ export async function createStorage(options: {
             const event = JSON.parse(json);
             if (event.createdAt) {
               event.createdAt = new Date(event.createdAt);
+            }
+            // Convert eventData.resumeAt back to Date for wait_created events
+            if (event.eventData?.resumeAt) {
+              event.eventData.resumeAt = new Date(event.eventData.resumeAt);
             }
             data.push(event);
           } catch {

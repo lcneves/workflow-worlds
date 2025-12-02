@@ -142,6 +142,12 @@ function rowToEvent(row: Row): Event {
     row.payload as string | null
   ) ?? {};
 
+  // Convert eventData.resumeAt back to Date for wait_created events
+  const eventData = payload.eventData as Record<string, unknown> | undefined;
+  if (eventData?.resumeAt && typeof eventData.resumeAt === 'string') {
+    eventData.resumeAt = new Date(eventData.resumeAt);
+  }
+
   const baseEvent = {
     eventId: row.event_id as string,
     runId: row.run_id as string,
