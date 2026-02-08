@@ -1,0 +1,469 @@
+# Runs the vercel/workflow e2e test suite against local builds of our world packages.
+# This mirrors what the upstream CI does when testing community worlds, but uses
+# our local (unpublished) builds instead of the npm-published packages.
+#
+# Architecture:
+#   build job  → builds local packages + upstream, shares both via actions/cache
+#   e2e-* jobs → restore caches, install world tarball, run tests
+
+name: E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      world:
+        description: 'World to test'
+        type: choice
+        options: ['all', 'turso', 'mongodb', 'redis']
+        default: 'all'
+      upstream-ref:
+        description: 'vercel/workflow git ref to test against'
+        type: string
+        default: 'main'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UPSTREAM_REF: ${{ inputs.upstream-ref || 'main' }}
+  APP_NAME: nextjs-turbopack
+
+jobs:
+  # ============================================================
+  # Build local packages + upstream (both cached)
+  # ============================================================
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      upstream-cache-key: ${{ steps.upstream-meta.outputs.cache-key }}
+      tarball-cache-key: ${{ steps.tarball-meta.outputs.cache-key }}
+      upstream-pnpm-version: ${{ steps.upstream-meta.outputs.pnpm-version }}
+    steps:
+      # --- Build local world packages ---
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - name: Pack world tarballs
+        run: |
+          mkdir -p .tarballs
+          for pkg in turso mongodb redis; do
+            (cd "packages/$pkg" && pnpm pack --pack-destination ../../.tarballs)
+          done
+          echo "::group::Tarballs"
+          ls -lh .tarballs/
+          echo "::endgroup::"
+
+      - name: Tarball metadata
+        id: tarball-meta
+        run: echo "cache-key=tarballs-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache tarballs
+        uses: actions/cache@v4
+        with:
+          path: .tarballs
+          key: ${{ steps.tarball-meta.outputs.cache-key }}
+
+      # --- Build upstream (with cache) ---
+      - name: Clone upstream
+        run: git clone --depth=1 --branch ${{ env.UPSTREAM_REF }} https://github.com/vercel/workflow.git .upstream
+
+      - name: Upstream metadata
+        id: upstream-meta
+        run: |
+          SHA=$(git -C .upstream rev-parse HEAD)
+          echo "cache-key=upstream-build-${SHA}" >> "$GITHUB_OUTPUT"
+          echo "Upstream commit: $SHA"
+          PNPM_VERSION=$(node -e "const pm = require('./.upstream/package.json').packageManager || ''; console.log(pm.split('@')[1] || '10.14.0')")
+          echo "pnpm-version=${PNPM_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Upstream pnpm version: $PNPM_VERSION"
+
+      - name: Restore upstream cache
+        id: upstream-cache
+        uses: actions/cache@v4
+        with:
+          path: .upstream
+          key: ${{ steps.upstream-meta.outputs.cache-key }}
+
+      - name: Install & build upstream
+        if: steps.upstream-cache.outputs.cache-hit != 'true'
+        working-directory: .upstream
+        run: |
+          # Use upstream's own pnpm version
+          PNPM_VERSION=$(node -e "const pm = require('./package.json').packageManager || ''; console.log(pm.split('@')[1] || '10.14.0')")
+          npm i -g "pnpm@${PNPM_VERSION}"
+          pnpm install --frozen-lockfile
+          pnpm turbo run build --filter='!./workbench/*'
+
+      - name: Trim upstream cache
+        if: steps.upstream-cache.outputs.cache-hit != 'true'
+        run: |
+          # Remove .git and all node_modules to keep cache small (~200MB vs ~1.5GB)
+          # E2E jobs will run pnpm install to restore node_modules
+          rm -rf .upstream/.git
+          find .upstream -name node_modules -type d -prune -exec rm -rf {} +
+          echo "Cache size after trim:"
+          du -sh .upstream
+
+  # ============================================================
+  # E2E tests per world (run in parallel)
+  # ============================================================
+
+  e2e-turso:
+    name: E2E - Turso
+    needs: build
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      inputs.world == 'all' ||
+      inputs.world == 'turso'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Restore upstream
+        uses: actions/cache/restore@v4
+        with:
+          path: .upstream
+          key: ${{ needs.build.outputs.upstream-cache-key }}
+          fail-on-cache-miss: true
+
+      - name: Restore tarballs
+        uses: actions/cache/restore@v4
+        with:
+          path: .tarballs
+          key: ${{ needs.build.outputs.tarball-cache-key }}
+          fail-on-cache-miss: true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ needs.build.outputs.upstream-pnpm-version }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: .upstream/pnpm-lock.yaml
+
+      - name: Install upstream dependencies
+        working-directory: .upstream
+        run: pnpm install --frozen-lockfile
+
+      - name: Install turso world
+        working-directory: .upstream
+        run: |
+          TARBALL=$(readlink -f ../.tarballs/workflow-worlds-turso-*.tgz | head -1)
+          pnpm --filter ${{ env.APP_NAME }} add "$TARBALL"
+
+      - name: Setup turso database
+        working-directory: .upstream/workbench/${{ env.APP_NAME }}
+        run: pnpm exec workflow-turso-setup
+        env:
+          WORKFLOW_TURSO_DATABASE_URL: 'file:${{ github.workspace }}/.upstream/workbench/nextjs-turbopack/workflow.db'
+
+      - name: Resolve symlinks
+        working-directory: .upstream
+        run: CI=true bash scripts/resolve-symlinks.sh workbench/${{ env.APP_NAME }}
+
+      - name: Run E2E tests
+        working-directory: .upstream
+        env:
+          NODE_OPTIONS: '--enable-source-maps'
+          APP_NAME: nextjs-turbopack
+          DEPLOYMENT_URL: 'http://localhost:3000'
+          WORKFLOW_TARGET_WORLD: '@workflow-worlds/turso'
+          WORKFLOW_TURSO_DATABASE_URL: 'file:${{ github.workspace }}/.upstream/workbench/nextjs-turbopack/workflow.db'
+          WORKFLOW_PUBLIC_MANIFEST: '1'
+          WORKFLOW_SERVICE_URL: 'http://localhost:3000'
+          DEV_TEST_CONFIG: >-
+            {"name":"nextjs-turbopack","project":"workbench-nextjs-turbopack-workflow",
+            "generatedStepPath":"app/.well-known/workflow/v1/step/route.js",
+            "generatedWorkflowPath":"app/.well-known/workflow/v1/flow/route.js",
+            "apiFilePath":"app/api/chat/route.ts","apiFileImportPath":"../../.."}
+        run: |
+          cd workbench/${{ env.APP_NAME }} && pnpm dev > ../../server-turso.log 2>&1 &
+          echo "Waiting for dev server..." && sleep 15
+          pnpm vitest run packages/core/e2e/e2e.test.ts \
+            --reporter=default --reporter=json \
+            --outputFile=e2e-turso.json || EXIT_CODE=$?
+          exit ${EXIT_CODE:-0}
+
+      - name: Show server logs on failure
+        if: failure()
+        working-directory: .upstream
+        run: echo "=== Dev server logs ===" && tail -200 server-turso.log || true
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-results-turso
+          path: |
+            .upstream/e2e-turso.json
+            .upstream/server-turso.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+  e2e-mongodb:
+    name: E2E - MongoDB
+    needs: build
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      inputs.world == 'all' ||
+      inputs.world == 'mongodb'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.runCommand(\"ping\").ok'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Restore upstream
+        uses: actions/cache/restore@v4
+        with:
+          path: .upstream
+          key: ${{ needs.build.outputs.upstream-cache-key }}
+          fail-on-cache-miss: true
+
+      - name: Restore tarballs
+        uses: actions/cache/restore@v4
+        with:
+          path: .tarballs
+          key: ${{ needs.build.outputs.tarball-cache-key }}
+          fail-on-cache-miss: true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ needs.build.outputs.upstream-pnpm-version }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: .upstream/pnpm-lock.yaml
+
+      - name: Install upstream dependencies
+        working-directory: .upstream
+        run: pnpm install --frozen-lockfile
+
+      - name: Install mongodb world
+        working-directory: .upstream
+        run: |
+          TARBALL=$(readlink -f ../.tarballs/workflow-worlds-mongodb-*.tgz | head -1)
+          pnpm --filter ${{ env.APP_NAME }} add "$TARBALL"
+
+      - name: Resolve symlinks
+        working-directory: .upstream
+        run: CI=true bash scripts/resolve-symlinks.sh workbench/${{ env.APP_NAME }}
+
+      - name: Run E2E tests
+        working-directory: .upstream
+        env:
+          NODE_OPTIONS: '--enable-source-maps'
+          APP_NAME: nextjs-turbopack
+          DEPLOYMENT_URL: 'http://localhost:3000'
+          WORKFLOW_TARGET_WORLD: '@workflow-worlds/mongodb'
+          WORKFLOW_MONGODB_URI: 'mongodb://localhost:27017'
+          WORKFLOW_MONGODB_DATABASE_NAME: 'workflow'
+          WORKFLOW_PUBLIC_MANIFEST: '1'
+          WORKFLOW_SERVICE_URL: 'http://localhost:3000'
+          DEV_TEST_CONFIG: >-
+            {"name":"nextjs-turbopack","project":"workbench-nextjs-turbopack-workflow",
+            "generatedStepPath":"app/.well-known/workflow/v1/step/route.js",
+            "generatedWorkflowPath":"app/.well-known/workflow/v1/flow/route.js",
+            "apiFilePath":"app/api/chat/route.ts","apiFileImportPath":"../../.."}
+        run: |
+          cd workbench/${{ env.APP_NAME }} && pnpm dev > ../../server-mongodb.log 2>&1 &
+          echo "Waiting for dev server..." && sleep 15
+          pnpm vitest run packages/core/e2e/e2e.test.ts \
+            --reporter=default --reporter=json \
+            --outputFile=e2e-mongodb.json || EXIT_CODE=$?
+          exit ${EXIT_CODE:-0}
+
+      - name: Show server logs on failure
+        if: failure()
+        working-directory: .upstream
+        run: echo "=== Dev server logs ===" && tail -200 server-mongodb.log || true
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-results-mongodb
+          path: |
+            .upstream/e2e-mongodb.json
+            .upstream/server-mongodb.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+  e2e-redis:
+    name: E2E - Redis
+    needs: build
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      inputs.world == 'all' ||
+      inputs.world == 'redis'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Restore upstream
+        uses: actions/cache/restore@v4
+        with:
+          path: .upstream
+          key: ${{ needs.build.outputs.upstream-cache-key }}
+          fail-on-cache-miss: true
+
+      - name: Restore tarballs
+        uses: actions/cache/restore@v4
+        with:
+          path: .tarballs
+          key: ${{ needs.build.outputs.tarball-cache-key }}
+          fail-on-cache-miss: true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ needs.build.outputs.upstream-pnpm-version }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: .upstream/pnpm-lock.yaml
+
+      - name: Install upstream dependencies
+        working-directory: .upstream
+        run: pnpm install --frozen-lockfile
+
+      - name: Install redis world
+        working-directory: .upstream
+        run: |
+          TARBALL=$(readlink -f ../.tarballs/workflow-worlds-redis-*.tgz | head -1)
+          pnpm --filter ${{ env.APP_NAME }} add "$TARBALL"
+
+      - name: Resolve symlinks
+        working-directory: .upstream
+        run: CI=true bash scripts/resolve-symlinks.sh workbench/${{ env.APP_NAME }}
+
+      - name: Run E2E tests
+        working-directory: .upstream
+        env:
+          NODE_OPTIONS: '--enable-source-maps'
+          APP_NAME: nextjs-turbopack
+          DEPLOYMENT_URL: 'http://localhost:3000'
+          WORKFLOW_TARGET_WORLD: '@workflow-worlds/redis'
+          WORKFLOW_REDIS_URI: 'redis://localhost:6379'
+          WORKFLOW_PUBLIC_MANIFEST: '1'
+          WORKFLOW_SERVICE_URL: 'http://localhost:3000'
+          DEV_TEST_CONFIG: >-
+            {"name":"nextjs-turbopack","project":"workbench-nextjs-turbopack-workflow",
+            "generatedStepPath":"app/.well-known/workflow/v1/step/route.js",
+            "generatedWorkflowPath":"app/.well-known/workflow/v1/flow/route.js",
+            "apiFilePath":"app/api/chat/route.ts","apiFileImportPath":"../../.."}
+        run: |
+          cd workbench/${{ env.APP_NAME }} && pnpm dev > ../../server-redis.log 2>&1 &
+          echo "Waiting for dev server..." && sleep 15
+          pnpm vitest run packages/core/e2e/e2e.test.ts \
+            --reporter=default --reporter=json \
+            --outputFile=e2e-redis.json || EXIT_CODE=$?
+          exit ${EXIT_CODE:-0}
+
+      - name: Show server logs on failure
+        if: failure()
+        working-directory: .upstream
+        run: echo "=== Dev server logs ===" && tail -200 server-redis.log || true
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-results-redis
+          path: |
+            .upstream/e2e-redis.json
+            .upstream/server-redis.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ============================================================
+  # Aggregate results and post summary
+  # ============================================================
+  summary:
+    name: E2E Summary
+    needs: [e2e-turso, e2e-mongodb, e2e-redis]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Download all results
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: e2e-results-*
+          path: e2e-results
+          merge-multiple: true
+
+      - name: Generate summary
+        id: summary
+        run: |
+          mkdir -p e2e-results
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          node scripts/aggregate-e2e-results.cjs e2e-results \
+            --run-url "$RUN_URL" \
+            >> "$GITHUB_STEP_SUMMARY" || true
+          # Ensure summary file exists for PR comment (fallback if script failed)
+          if [ ! -s e2e-results/e2e-summary.md ]; then
+            cat > e2e-results/e2e-summary.md <<EOF
+          ## E2E Test Results
+
+          E2E jobs failed before producing test results. [View workflow run]($RUN_URL)
+          EOF
+          fi
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: e2e-test-results
+          path: e2e-results/e2e-summary.md
